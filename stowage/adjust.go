@@ -47,94 +47,15 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 		return nil, f(ErrEmptyAdjustment, aid, "调整 %s 不包含任何操作", aid)
 	}
 
-	// 逐条校验操作。
-	seen := make(map[string]bool)
-	type validOp struct {
-		op     Op
-		cargo  *cargo
-		target *compartment // 装载/移动的目标舱位；卸下时为 nil
-	}
-	vops := make([]validOp, 0, len(ops))
-	affected := make(map[string]bool)
-
-	for _, op := range ops {
-		cid := strings.TrimSpace(op.CargoID)
-		if cid == "" {
-			return nil, f(ErrInvalidID, "", "货物编号为空")
-		}
-		c, ok := r.cargos[cid]
-		if !ok {
-			return nil, f(ErrNotFound, cid, "货物 %s 不存在", cid)
-		}
-		if seen[cid] {
-			return nil, f(ErrDuplicateOp, cid, "货物 %s 在同一次调整中出现多次", cid)
-		}
-		seen[cid] = true
-
-		switch op.Kind {
-		case OpLoad:
-			if c.compartmentID != "" {
-				return nil, f(ErrStateMismatch, cid, "货物 %s 已装载于舱位 %s，不能再次装载", cid, c.compartmentID)
-			}
-			tid := strings.TrimSpace(op.Target)
-			if tid == "" {
-				return nil, f(ErrInvalidID, "", "目标舱位编号为空")
-			}
-			t, ok := r.compartments[tid]
-			if !ok {
-				return nil, f(ErrNotFound, tid, "舱位 %s 不存在", tid)
-			}
-			vops = append(vops, validOp{op, c, t})
-			affected[t.id] = true
-		case OpUnload:
-			if c.compartmentID == "" {
-				return nil, f(ErrStateMismatch, cid, "货物 %s 未装载，不能卸下", cid)
-			}
-			vops = append(vops, validOp{op, c, nil})
-			affected[c.compartmentID] = true
-		case OpMove:
-			if c.compartmentID == "" {
-				return nil, f(ErrStateMismatch, cid, "货物 %s 未装载，不能移动", cid)
-			}
-			tid := strings.TrimSpace(op.Target)
-			if tid == "" {
-				return nil, f(ErrInvalidID, "", "目标舱位编号为空")
-			}
-			t, ok := r.compartments[tid]
-			if !ok {
-				return nil, f(ErrNotFound, tid, "舱位 %s 不存在", tid)
-			}
-			if t.id == c.compartmentID {
-				return nil, f(ErrDuplicateOp, cid, "货物 %s 已在舱位 %s，不能移动到原舱位", cid, t.id)
-			}
-			vops = append(vops, validOp{op, c, t})
-			affected[c.compartmentID] = true
-			affected[t.id] = true
-		default:
-			return nil, f(ErrInvalidOp, cid, "货物 %s 的操作种类 %d 无法识别", cid, int(op.Kind))
-		}
+	// 逐条校验操作本身的合法性。
+	vops, affected, verr := r.validateOps(ops)
+	if verr != nil {
+		verr.AdjustmentID = aid
+		return nil, verr
 	}
 
 	// 在模拟配载上应用全部操作。
-	final := make(map[string]map[string]*cargo, len(r.compartments))
-	for id, comp := range r.compartments {
-		set := make(map[string]*cargo, len(comp.cargo))
-		for cid, c := range comp.cargo {
-			set[cid] = c
-		}
-		final[id] = set
-	}
-	for _, v := range vops {
-		switch v.op.Kind {
-		case OpLoad:
-			final[v.target.id][v.cargo.id] = v.cargo
-		case OpUnload:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-		case OpMove:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-			final[v.target.id][v.cargo.id] = v.cargo
-		}
-	}
+	final := r.simulate(vops)
 
 	// 按最终配载校验承重与混装限制。
 	for id, set := range final {
@@ -233,4 +154,105 @@ func canonicalKey(ops []Op) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+// validOp 是一条通过逐条合法性校验的操作。
+type validOp struct {
+	op     Op
+	cargo  *cargo
+	target *compartment // 装载/移动的目标舱位；卸下时为 nil
+}
+
+// validateOps 逐条校验操作本身的合法性（调用方持锁）。
+//
+// 返回通过校验的操作与受影响舱位集合。任一操作不合法时，按输入顺序返回
+// 第一个非法操作的现有错误种类及涉及对象，不返回局部结果。
+func (r *Registry) validateOps(ops []Op) ([]validOp, map[string]bool, *Error) {
+	seen := make(map[string]bool)
+	vops := make([]validOp, 0, len(ops))
+	affected := make(map[string]bool)
+
+	for _, op := range ops {
+		cid := strings.TrimSpace(op.CargoID)
+		if cid == "" {
+			return nil, nil, fail(ErrInvalidID, "", "货物编号为空")
+		}
+		c, ok := r.cargos[cid]
+		if !ok {
+			return nil, nil, fail(ErrNotFound, cid, "货物 %s 不存在", cid)
+		}
+		if seen[cid] {
+			return nil, nil, fail(ErrDuplicateOp, cid, "货物 %s 在同一次调整中出现多次", cid)
+		}
+		seen[cid] = true
+
+		switch op.Kind {
+		case OpLoad:
+			if c.compartmentID != "" {
+				return nil, nil, fail(ErrStateMismatch, cid, "货物 %s 已装载于舱位 %s，不能再次装载", cid, c.compartmentID)
+			}
+			tid := strings.TrimSpace(op.Target)
+			if tid == "" {
+				return nil, nil, fail(ErrInvalidID, "", "目标舱位编号为空")
+			}
+			t, ok := r.compartments[tid]
+			if !ok {
+				return nil, nil, fail(ErrNotFound, tid, "舱位 %s 不存在", tid)
+			}
+			vops = append(vops, validOp{op, c, t})
+			affected[t.id] = true
+		case OpUnload:
+			if c.compartmentID == "" {
+				return nil, nil, fail(ErrStateMismatch, cid, "货物 %s 未装载，不能卸下", cid)
+			}
+			vops = append(vops, validOp{op, c, nil})
+			affected[c.compartmentID] = true
+		case OpMove:
+			if c.compartmentID == "" {
+				return nil, nil, fail(ErrStateMismatch, cid, "货物 %s 未装载，不能移动", cid)
+			}
+			tid := strings.TrimSpace(op.Target)
+			if tid == "" {
+				return nil, nil, fail(ErrInvalidID, "", "目标舱位编号为空")
+			}
+			t, ok := r.compartments[tid]
+			if !ok {
+				return nil, nil, fail(ErrNotFound, tid, "舱位 %s 不存在", tid)
+			}
+			if t.id == c.compartmentID {
+				return nil, nil, fail(ErrDuplicateOp, cid, "货物 %s 已在舱位 %s，不能移动到原舱位", cid, t.id)
+			}
+			vops = append(vops, validOp{op, c, t})
+			affected[c.compartmentID] = true
+			affected[t.id] = true
+		default:
+			return nil, nil, fail(ErrInvalidOp, cid, "货物 %s 的操作种类 %d 无法识别", cid, int(op.Kind))
+		}
+	}
+	return vops, affected, nil
+}
+
+// simulate 在配载副本上应用全部操作，返回最终配载（调用方持锁）。
+// 不修改任何内部记录。
+func (r *Registry) simulate(vops []validOp) map[string]map[string]*cargo {
+	final := make(map[string]map[string]*cargo, len(r.compartments))
+	for id, comp := range r.compartments {
+		set := make(map[string]*cargo, len(comp.cargo))
+		for cid, c := range comp.cargo {
+			set[cid] = c
+		}
+		final[id] = set
+	}
+	for _, v := range vops {
+		switch v.op.Kind {
+		case OpLoad:
+			final[v.target.id][v.cargo.id] = v.cargo
+		case OpUnload:
+			delete(final[v.cargo.compartmentID], v.cargo.id)
+		case OpMove:
+			delete(final[v.cargo.compartmentID], v.cargo.id)
+			final[v.target.id][v.cargo.id] = v.cargo
+		}
+	}
+	return final
 }
