@@ -47,115 +47,24 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 		return nil, f(ErrEmptyAdjustment, aid, "调整 %s 不包含任何操作", aid)
 	}
 
-	// 逐条校验操作。
-	seen := make(map[string]bool)
-	type validOp struct {
-		op     Op
-		cargo  *cargo
-		target *compartment // 装载/移动的目标舱位；卸下时为 nil
+	vops, final, affected, err := r.prepareOps(ops, f)
+	if err != nil {
+		return nil, err
 	}
-	vops := make([]validOp, 0, len(ops))
-	affected := make(map[string]bool)
 
-	for _, op := range ops {
-		cid := strings.TrimSpace(op.CargoID)
-		if cid == "" {
-			return nil, f(ErrInvalidID, "", "货物编号为空")
-		}
-		c, ok := r.cargos[cid]
-		if !ok {
-			return nil, f(ErrNotFound, cid, "货物 %s 不存在", cid)
-		}
-		if seen[cid] {
-			return nil, f(ErrDuplicateOp, cid, "货物 %s 在同一次调整中出现多次", cid)
-		}
-		seen[cid] = true
-
-		switch op.Kind {
-		case OpLoad:
-			if c.compartmentID != "" {
-				return nil, f(ErrStateMismatch, cid, "货物 %s 已装载于舱位 %s，不能再次装载", cid, c.compartmentID)
-			}
-			tid := strings.TrimSpace(op.Target)
-			if tid == "" {
-				return nil, f(ErrInvalidID, "", "目标舱位编号为空")
-			}
-			t, ok := r.compartments[tid]
-			if !ok {
-				return nil, f(ErrNotFound, tid, "舱位 %s 不存在", tid)
-			}
-			vops = append(vops, validOp{op, c, t})
-			affected[t.id] = true
-		case OpUnload:
-			if c.compartmentID == "" {
-				return nil, f(ErrStateMismatch, cid, "货物 %s 未装载，不能卸下", cid)
-			}
-			vops = append(vops, validOp{op, c, nil})
-			affected[c.compartmentID] = true
-		case OpMove:
-			if c.compartmentID == "" {
-				return nil, f(ErrStateMismatch, cid, "货物 %s 未装载，不能移动", cid)
-			}
-			tid := strings.TrimSpace(op.Target)
-			if tid == "" {
-				return nil, f(ErrInvalidID, "", "目标舱位编号为空")
-			}
-			t, ok := r.compartments[tid]
-			if !ok {
-				return nil, f(ErrNotFound, tid, "舱位 %s 不存在", tid)
-			}
-			if t.id == c.compartmentID {
-				return nil, f(ErrDuplicateOp, cid, "货物 %s 已在舱位 %s，不能移动到原舱位", cid, t.id)
-			}
-			vops = append(vops, validOp{op, c, t})
-			affected[c.compartmentID] = true
-			affected[t.id] = true
+	// 按最终配载校验承重与混装限制，返回第一个问题即拒绝整次调整。
+	if rej := r.firstRejection(final); rej != nil {
+		switch rej.Kind {
+		case ErrOverflow:
+			return nil, f(ErrOverflow, rej.CompartmentID, "舱位 %s 重量合计超过 int64 可表示范围", rej.CompartmentID)
+		case ErrOverweight:
+			return nil, f(ErrOverweight, rej.CompartmentID,
+				"舱位 %s 总重量 %d 千克超过最大承重 %d 千克",
+				rej.CompartmentID, rej.UsedWeight, r.compartments[rej.CompartmentID].maxWeight)
 		default:
-			return nil, f(ErrInvalidOp, cid, "货物 %s 的操作种类 %d 无法识别", cid, int(op.Kind))
-		}
-	}
-
-	// 在模拟配载上应用全部操作。
-	final := make(map[string]map[string]*cargo, len(r.compartments))
-	for id, comp := range r.compartments {
-		set := make(map[string]*cargo, len(comp.cargo))
-		for cid, c := range comp.cargo {
-			set[cid] = c
-		}
-		final[id] = set
-	}
-	for _, v := range vops {
-		switch v.op.Kind {
-		case OpLoad:
-			final[v.target.id][v.cargo.id] = v.cargo
-		case OpUnload:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-		case OpMove:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-			final[v.target.id][v.cargo.id] = v.cargo
-		}
-	}
-
-	// 按最终配载校验承重与混装限制。
-	for id, set := range final {
-		var sum int64
-		destinations := make(map[string]bool)
-		for _, c := range set {
-			if c.weight > math.MaxInt64-sum {
-				return nil, f(ErrOverflow, id, "舱位 %s 重量合计超过 int64 可表示范围", id)
-			}
-			sum += c.weight
-			destinations[c.destination] = true
-		}
-		if sum > r.compartments[id].maxWeight {
-			return nil, f(ErrOverweight, id, "舱位 %s 总重量 %d 千克超过最大承重 %d 千克", id, sum, r.compartments[id].maxWeight)
-		}
-		if len(destinations) > 1 {
-			for _, c := range set {
-				if !c.allowMixed {
-					return nil, f(ErrMixedLoading, c.id, "舱位 %s 存在不同目的地货物，但货物 %s 不允许混装", id, c.id)
-				}
-			}
+			return nil, f(ErrMixedLoading, rej.firstOffender(),
+				"舱位 %s 存在不同目的地货物，但货物 %s 不允许混装",
+				rej.CompartmentID, rej.firstOffender())
 		}
 	}
 
@@ -205,6 +114,217 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 	r.adjustments[aid] = result
 	r.contents[aid] = canonicalKey(ops)
 	return cloneResult(result), nil
+}
+
+// validOp 是一条通过逐条校验的操作，附带其涉及的内部记录。
+type validOp struct {
+	op     Op
+	cargo  *cargo
+	target *compartment // 装载/移动的目标舱位；卸下时为 nil
+}
+
+// prepareOps 逐条校验操作并在模拟配载上应用全部操作。
+// 调用方必须持有 r.mu。任一操作不合法时返回该错误，最终配载与受影响
+// 舱位集合只在全部操作合法时返回。受影响舱位包括各操作的原舱位与
+// 目标舱位（交换中的两个舱位都会纳入）。
+func (r *Registry) prepareOps(
+	ops []Op,
+	failf func(kind ErrorKind, id string, format string, args ...any) *Error,
+) (vops []validOp, final map[string]map[string]*cargo, affected map[string]bool, err error) {
+	seen := make(map[string]bool)
+	vops = make([]validOp, 0, len(ops))
+	affected = make(map[string]bool)
+
+	for _, op := range ops {
+		cid := strings.TrimSpace(op.CargoID)
+		if cid == "" {
+			return nil, nil, nil, failf(ErrInvalidID, "", "货物编号为空")
+		}
+		c, ok := r.cargos[cid]
+		if !ok {
+			return nil, nil, nil, failf(ErrNotFound, cid, "货物 %s 不存在", cid)
+		}
+		if seen[cid] {
+			return nil, nil, nil, failf(ErrDuplicateOp, cid, "货物 %s 在同一次调整中出现多次", cid)
+		}
+		seen[cid] = true
+
+		switch op.Kind {
+		case OpLoad:
+			if c.compartmentID != "" {
+				return nil, nil, nil, failf(ErrStateMismatch, cid, "货物 %s 已装载于舱位 %s，不能再次装载", cid, c.compartmentID)
+			}
+			tid := strings.TrimSpace(op.Target)
+			if tid == "" {
+				return nil, nil, nil, failf(ErrInvalidID, "", "目标舱位编号为空")
+			}
+			t, ok := r.compartments[tid]
+			if !ok {
+				return nil, nil, nil, failf(ErrNotFound, tid, "舱位 %s 不存在", tid)
+			}
+			vops = append(vops, validOp{op, c, t})
+			affected[t.id] = true
+		case OpUnload:
+			if c.compartmentID == "" {
+				return nil, nil, nil, failf(ErrStateMismatch, cid, "货物 %s 未装载，不能卸下", cid)
+			}
+			vops = append(vops, validOp{op, c, nil})
+			affected[c.compartmentID] = true
+		case OpMove:
+			if c.compartmentID == "" {
+				return nil, nil, nil, failf(ErrStateMismatch, cid, "货物 %s 未装载，不能移动", cid)
+			}
+			tid := strings.TrimSpace(op.Target)
+			if tid == "" {
+				return nil, nil, nil, failf(ErrInvalidID, "", "目标舱位编号为空")
+			}
+			t, ok := r.compartments[tid]
+			if !ok {
+				return nil, nil, nil, failf(ErrNotFound, tid, "舱位 %s 不存在", tid)
+			}
+			if t.id == c.compartmentID {
+				return nil, nil, nil, failf(ErrDuplicateOp, cid, "货物 %s 已在舱位 %s，不能移动到原舱位", cid, t.id)
+			}
+			vops = append(vops, validOp{op, c, t})
+			affected[c.compartmentID] = true
+			affected[t.id] = true
+		default:
+			return nil, nil, nil, failf(ErrInvalidOp, cid, "货物 %s 的操作种类 %d 无法识别", cid, int(op.Kind))
+		}
+	}
+
+	// 在模拟配载上应用全部操作，判断以完成后的最终状态为准。
+	final = make(map[string]map[string]*cargo, len(r.compartments))
+	for id, comp := range r.compartments {
+		set := make(map[string]*cargo, len(comp.cargo))
+		for cid, c := range comp.cargo {
+			set[cid] = c
+		}
+		final[id] = set
+	}
+	for _, v := range vops {
+		switch v.op.Kind {
+		case OpLoad:
+			final[v.target.id][v.cargo.id] = v.cargo
+		case OpUnload:
+			delete(final[v.cargo.compartmentID], v.cargo.id)
+		case OpMove:
+			delete(final[v.cargo.compartmentID], v.cargo.id)
+			final[v.target.id][v.cargo.id] = v.cargo
+		}
+	}
+	return vops, final, affected, nil
+}
+
+// evaluateFinal 按最终配载评估每个舱位的承重与混装限制，一个舱位可以
+// 同时得到重量原因（超重或溢出）与混装原因。结果不保证顺序。
+// 调用方必须持有 r.mu。
+func (r *Registry) evaluateFinal(final map[string]map[string]*cargo) []*Rejection {
+	var rejs []*Rejection
+	for id, set := range final {
+		comp := r.compartments[id]
+
+		// 重量原因：溢出优先，溢出时不提供任何重量数值。
+		var sum int64
+		overflow := false
+		for _, c := range set {
+			if c.weight > math.MaxInt64-sum {
+				overflow = true
+				break
+			}
+			sum += c.weight
+		}
+		var rej *Rejection
+		if overflow {
+			rej = &Rejection{
+				CompartmentID: id,
+				Kind:          ErrOverflow,
+				MaxWeight:     comp.maxWeight,
+			}
+		} else if sum > comp.maxWeight {
+			rej = &Rejection{
+				CompartmentID:   id,
+				Kind:            ErrOverweight,
+				MaxWeight:       comp.maxWeight,
+				UsedWeight:      sum,
+				RemainingWeight: comp.maxWeight - sum,
+				Overweight:      sum - comp.maxWeight,
+			}
+		}
+
+		// 混装原因：不同目的地共舱时，列出全部不允许混装的货物。
+		destinations := make(map[string][]string)
+		destSet := make(map[string]bool)
+		var offenders []string
+		for _, c := range set {
+			destinations[c.destination] = append(destinations[c.destination], c.id)
+			destSet[c.destination] = true
+			if !c.allowMixed {
+				offenders = append(offenders, c.id)
+			}
+		}
+		if len(destSet) > 1 && len(offenders) > 0 {
+			dests := make([]MixedDestination, 0, len(destinations))
+			for dest, ids := range destinations {
+				sorted := append([]string(nil), ids...)
+				sort.Strings(sorted)
+				dests = append(dests, MixedDestination{Destination: dest, CargoIDs: sorted})
+			}
+			sort.Slice(dests, func(i, j int) bool {
+				return dests[i].Destination < dests[j].Destination
+			})
+			sort.Strings(offenders)
+			mr := &Rejection{
+				CompartmentID:  id,
+				Kind:           ErrMixedLoading,
+				MaxWeight:      comp.maxWeight,
+				Destinations:   dests,
+				OffendingCargo: offenders,
+			}
+			if rej != nil {
+				rejs = append(rejs, rej, mr)
+			} else {
+				rejs = append(rejs, mr)
+			}
+		} else if rej != nil {
+			rejs = append(rejs, rej)
+		}
+	}
+	return rejs
+}
+
+// firstRejection 以与正式调整一致的顺序返回第一个拒绝原因；没有则 nil。
+// 调用方必须持有 r.mu。
+func (r *Registry) firstRejection(final map[string]map[string]*cargo) *Rejection {
+	rejs := r.evaluateFinal(final)
+	if len(rejs) == 0 {
+		return nil
+	}
+	sort.Slice(rejs, func(i, j int) bool {
+		if rejs[i].CompartmentID != rejs[j].CompartmentID {
+			return rejs[i].CompartmentID < rejs[j].CompartmentID
+		}
+		return rejKindOrder(rejs[i].Kind) < rejKindOrder(rejs[j].Kind)
+	})
+	return rejs[0]
+}
+
+// rejKindOrder 规定同一舱位的拒绝原因次序：重量（超重/溢出）先于混装。
+func rejKindOrder(k ErrorKind) int {
+	switch k {
+	case ErrOverflow, ErrOverweight:
+		return 0
+	default:
+		return 1
+	}
+}
+
+// firstOffender 返回混装原因中编号最小的货物，用于错误说明。
+func (x *Rejection) firstOffender() string {
+	if len(x.OffendingCargo) == 0 {
+		return ""
+	}
+	return x.OffendingCargo[0]
 }
 
 // canonicalKey 生成调整内容的规范化键：操作种类、货物、目标舱位相同

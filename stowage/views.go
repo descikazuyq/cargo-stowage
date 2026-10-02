@@ -72,3 +72,52 @@ type CompartmentView struct {
 	RemainingWeight int64
 	Cargo           []CargoView // 按编号字典序排列
 }
+
+// MixedDestination 描述预计配载中一个舱位内某个目的地对应的全部货物。
+type MixedDestination struct {
+	Destination string
+	CargoIDs    []string // 按编号字典序排列
+}
+
+// Rejection 描述预计配载中单个舱位的一条拒绝原因。
+//
+// Kind 为 ErrOverweight 时，UsedWeight、RemainingWeight、Overweight 与
+// MaxWeight 均有效；Kind 为 ErrOverflow（重量溢出）时，预计已用重量、
+// 剩余重量与超出量无法用 int64 表示，对应数值字段保持零值，仅提供
+// MaxWeight、货物清单与混装原因；Kind 为 ErrMixedLoading 时，
+// Destinations 给出各目的地对应的货物，OffendingCargo 列出其中全部
+// 不允许混装的货物编号。
+type Rejection struct {
+	CompartmentID   string
+	Kind            ErrorKind
+	MaxWeight       int64
+	UsedWeight      int64              // 超重时为预计总重量；溢出或混装时为零值
+	RemainingWeight int64              // 超重时为预计剩余重量（负值）；其余为零值
+	Overweight      int64              // 超重时为超出承重的千克数；其余为零值
+	Destinations    []MixedDestination // 混装冲突时各目的地及其货物，按目的地字典序排列
+	OffendingCargo  []string           // 混装冲突时全部不允许混装的货物编号，字典序排列
+}
+
+// CompartmentPreview 是受影响舱位调整前后的完整配载快照。
+// After 反映预计配载：预计超重时 RemainingWeight 为负值；预计重量溢出
+// int64 时 After 不提供已用与剩余重量数值（保持零值），货物清单照常返回。
+type CompartmentPreview struct {
+	ID     string
+	Before CompartmentView
+	After  CompartmentView
+}
+
+// PreviewResult 是一次预览的完整结果，本身是与登记处状态无关的独立快照。
+type PreviewResult struct {
+	// Submittable 表示按当前登记处状态，这组操作能否作为一次调整提交。
+	Submittable bool
+	// CargoChanges 列出清单涉及货物的原舱位与预计舱位，按货物编号字典序排列；
+	// 未装载用空编号表示。
+	CargoChanges []CargoChange
+	// Compartments 列出全部受影响舱位调整前后的完整货物清单、已用重量与
+	// 剩余重量，按舱位编号字典序排列。即使交换后总重量不变也会列出。
+	Compartments []CompartmentPreview
+	// Rejections 列出预计配载的全部拒绝原因，按舱位编号排列，同一舱位
+	// 先重量（超重/溢出）后混装。为空表示 Submittable 为 true。
+	Rejections []Rejection
+}
