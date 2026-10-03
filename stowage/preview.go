@@ -1,9 +1,6 @@
 package stowage
 
-import (
-	"math"
-	"sort"
-)
+import "sort"
 
 // Preview 预演一批装载、卸下、移动操作，返回这批安排按当前配载完成后的
 // 预计结果。
@@ -64,9 +61,11 @@ func (r *Registry) Preview(ops []Op) (*PreviewResult, error) {
 	compartments := make([]CompartmentPreview, 0, len(compIDs))
 	for _, id := range compIDs {
 		compartments = append(compartments, CompartmentPreview{
-			ID:     id,
-			Before: *compartmentView(r.compartments[id]),
-			After:  compartmentAfterView(r.compartments[id], final[id]),
+			ID: id,
+			// 调整前是实际配载（真实位置），调整后是预计配载（预计位置）；
+			// 两者与舱位查询共用同一个快照构造规则，各自独立复制。
+			Before: *compartmentSnapshot(r.compartments[id], r.compartments[id].cargo, false),
+			After:  *compartmentSnapshot(r.compartments[id], final[id], true),
 		})
 	}
 
@@ -89,47 +88,6 @@ func (r *Registry) Preview(ops []Op) (*PreviewResult, error) {
 		Compartments: compartments,
 		Rejections:   rejections,
 	}, nil
-}
-
-// compartmentAfterView 构造舱位在模拟配载下的完整快照。
-// 重量合计溢出 int64 时，已用重量与剩余重量不提供数值（保持零值），
-// 货物清单照常返回。调用方持锁。
-func compartmentAfterView(comp *compartment, set map[string]*cargo) CompartmentView {
-	ids := make([]string, 0, len(set))
-	for cid := range set {
-		ids = append(ids, cid)
-	}
-	sort.Strings(ids)
-	cargoViews := make([]CargoView, 0, len(ids))
-	var used int64
-	overflow := false
-	for _, cid := range ids {
-		c := set[cid]
-		view := *cargoView(c)
-		// 预计清单中的货物按模拟配载完成后的所属舱位展示；编号、重量、
-		// 目的地与混装许可仍取登记资料。cargoView 返回的是值副本，改写
-		// 位置字段不影响登记处。
-		view.Loaded = true
-		view.CompartmentID = comp.id
-		cargoViews = append(cargoViews, view)
-		if !overflow {
-			if c.weight > math.MaxInt64-used {
-				overflow = true
-			} else {
-				used += c.weight
-			}
-		}
-	}
-	view := CompartmentView{
-		ID:        comp.id,
-		MaxWeight: comp.maxWeight,
-		Cargo:     cargoViews,
-	}
-	if !overflow {
-		view.UsedWeight = used
-		view.RemainingWeight = comp.maxWeight - used
-	}
-	return view
 }
 
 // cloneRejection 复制拒绝原因中的切片，保证调用方修改不影响其他结果。

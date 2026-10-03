@@ -1,6 +1,7 @@
 package stowage
 
 import (
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -113,7 +114,8 @@ func (r *Registry) Compartment(id string) (*CompartmentView, error) {
 	if !ok {
 		return nil, fail(ErrNotFound, cid, "舱位 %s 不存在", cid)
 	}
-	return compartmentView(comp), nil
+	// 实际查询：清单展示货物的真实所属舱位。
+	return compartmentSnapshot(comp, comp.cargo, false), nil
 }
 
 // Cargo 查询货物的当前舱位或未装载状态。
@@ -145,34 +147,59 @@ func cargoView(c *cargo) *CargoView {
 	}
 }
 
-// compartmentView 构造舱位快照（调用方持锁）。
-func compartmentView(comp *compartment) *CompartmentView {
-	used := sumSet(comp.cargo)
-	ids := make([]string, 0, len(comp.cargo))
-	for cid := range comp.cargo {
+// compartmentSnapshot 按统一规则构造舱位配载快照，供舱位查询与调整预览
+// 共用（调用方持锁）。set 是该舱位清单对应的货物集合：实际配载传舱位
+// 当前货物，预计配载传模拟完成后的集合。
+//
+// projected 为 true 时表示预计配载：清单中的货物一律显示为已装载且属于
+// comp（预计所属舱位），编号、重量、目的地与混装许可仍取登记资料；
+// projected 为 false 时表示实际配载，每件货物显示其真实装载状态与所属
+// 舱位。两类清单都包含 set 中的全部货物并按货物编号字典序排列。
+//
+// 重量合计溢出 int64 时（只会出现在预计配载），货物清单照常返回，已用
+// 重量与剩余重量保持零值，由拒绝原因表达溢出；其余情况剩余重量为
+// 最大承重减已用重量（预计超重时为负值）。
+func compartmentSnapshot(comp *compartment, set map[string]*cargo, projected bool) *CompartmentView {
+	ids := make([]string, 0, len(set))
+	for cid := range set {
 		ids = append(ids, cid)
 	}
 	sort.Strings(ids)
-	views := make([]CargoView, 0, len(ids))
+
+	cargoViews := make([]CargoView, 0, len(ids))
 	for _, cid := range ids {
-		views = append(views, *cargoView(comp.cargo[cid]))
+		view := *cargoView(set[cid])
+		if projected {
+			// cargoView 返回值副本，改写预计位置不影响登记处或同批其他快照。
+			view.Loaded = true
+			view.CompartmentID = comp.id
+		}
+		cargoViews = append(cargoViews, view)
 	}
-	return &CompartmentView{
-		ID:              comp.id,
-		MaxWeight:       comp.maxWeight,
-		UsedWeight:      used,
-		RemainingWeight: comp.maxWeight - used,
-		Cargo:           views,
+
+	view := &CompartmentView{
+		ID:        comp.id,
+		MaxWeight: comp.maxWeight,
+		Cargo:     cargoViews,
 	}
+	if used, overflow := sumCargoWeight(set); !overflow {
+		view.UsedWeight = used
+		view.RemainingWeight = comp.maxWeight - used
+	}
+	return view
 }
 
-// sumSet 合计一组货物的重量（调用方持锁）。
-func sumSet(set map[string]*cargo) int64 {
-	var sum int64
+// sumCargoWeight 合计一组货物的重量，按集合当前内容计算（调用方持锁）。
+// 合计超过 int64 可表示范围时 overflow 为 true、sum 为部分和，调用方不
+// 应采用其数值；查询、预览清单与承重/溢出拒绝判断共用同一套汇总规则。
+func sumCargoWeight(set map[string]*cargo) (sum int64, overflow bool) {
 	for _, c := range set {
+		if c.weight > math.MaxInt64-sum {
+			return sum, true
+		}
 		sum += c.weight
 	}
-	return sum
+	return sum, false
 }
 
 // cloneResult 复制一份调整结果，避免调用方修改影响已保存的快照。

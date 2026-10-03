@@ -2,7 +2,6 @@ package stowage
 
 import (
 	"encoding/json"
-	"math"
 	"sort"
 	"strings"
 )
@@ -68,14 +67,17 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 		}
 	}
 
-	// 全部合法，正式生效。先计算受影响舱位调整前后的重量。
+	// 全部合法，正式生效。先计算受影响舱位调整前后的重量。此处 final 已
+	// 通过承重与溢出校验，实际配载也始终处于不溢出状态，overflow 不会发生。
 	cargoChanges := make([]CargoChange, 0, len(vops))
 	compChanges := make([]CompartmentChange, 0, len(affected))
 	for id := range affected {
+		before, _ := sumCargoWeight(r.compartments[id].cargo)
+		after, _ := sumCargoWeight(final[id])
 		compChanges = append(compChanges, CompartmentChange{
 			CompartmentID: id,
-			WeightBefore:  sumSet(r.compartments[id].cargo),
-			WeightAfter:   sumSet(final[id]),
+			WeightBefore:  before,
+			WeightAfter:   after,
 		})
 	}
 	sort.Slice(compChanges, func(i, j int) bool {
@@ -224,16 +226,9 @@ func (r *Registry) evaluateFinal(final map[string]map[string]*cargo) []*Rejectio
 	for id, set := range final {
 		comp := r.compartments[id]
 
-		// 重量原因：溢出优先，溢出时不提供任何重量数值。
-		var sum int64
-		overflow := false
-		for _, c := range set {
-			if c.weight > math.MaxInt64-sum {
-				overflow = true
-				break
-			}
-			sum += c.weight
-		}
+		// 重量原因：溢出优先，溢出时不提供任何重量数值。汇总规则与舱位
+		// 快照（查询、预览）完全一致。
+		sum, overflow := sumCargoWeight(set)
 		var rej *Rejection
 		if overflow {
 			rej = &Rejection{
