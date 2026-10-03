@@ -27,6 +27,145 @@ func cargoIDs(v CompartmentView) []string {
 
 // ---------- 可提交预览 ----------
 
+func TestPreviewAfterListsShowProjectedPositions(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCompartment("C2", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G2", 20, "X", false); err != nil {
+		t.Fatal(err)
+	}
+	mustAdjust(t, r, "A1", []Op{{Kind: OpLoad, CargoID: "G2", Target: "C1"}})
+
+	// 装未装载的 G1 到 C2，并把 G2 从 C1 移到 C2。
+	res, err := r.Preview([]Op{
+		{Kind: OpLoad, CargoID: "G1", Target: "C2"},
+		{Kind: OpMove, CargoID: "G2", Target: "C2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Submittable {
+		t.Fatalf("应可提交: %+v", res.Rejections)
+	}
+	c1, c2 := res.Compartments[0], res.Compartments[1]
+
+	// C1 的 Before 保留 G2 及其原位置；After 为空。
+	if len(c1.Before.Cargo) != 1 || c1.Before.Cargo[0].ID != "G2" ||
+		!c1.Before.Cargo[0].Loaded || c1.Before.Cargo[0].CompartmentID != "C1" {
+		t.Fatalf("C1 调整前清单应保留 G2 原位置: %+v", c1.Before.Cargo)
+	}
+	if len(c1.After.Cargo) != 0 {
+		t.Fatalf("C1 预计清单应为空: %+v", c1.After.Cargo)
+	}
+
+	// C2 的 After 中两件货物都显示已装载且属于 C2，登记资料不变。
+	if len(c2.After.Cargo) != 2 {
+		t.Fatalf("C2 预计清单应含两件货物: %+v", c2.After.Cargo)
+	}
+	for _, cv := range c2.After.Cargo {
+		if !cv.Loaded || cv.CompartmentID != "C2" {
+			t.Fatalf("预计清单中的货物应显示已装载于 C2: %+v", cv)
+		}
+	}
+	g1, g2 := c2.After.Cargo[0], c2.After.Cargo[1]
+	if g1.ID != "G1" || g1.Weight != 10 || g1.Destination != "X" || !g1.AllowMixed {
+		t.Fatalf("G1 登记资料不应被改写: %+v", g1)
+	}
+	if g2.ID != "G2" || g2.Weight != 20 || g2.Destination != "X" || g2.AllowMixed {
+		t.Fatalf("G2 登记资料不应被改写: %+v", g2)
+	}
+
+	// 预览后登记状态不变。
+	cv, _ := r.Cargo("G1")
+	if cv.Loaded || cv.CompartmentID != "" {
+		t.Fatalf("预览不应改变货物状态: %+v", cv)
+	}
+}
+
+func TestPreviewSwapAfterListsShowSwappedPositions(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCompartment("C2", 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 30, "X", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G2", 30, "X", false); err != nil {
+		t.Fatal(err)
+	}
+	mustAdjust(t, r, "A1", []Op{
+		{Kind: OpLoad, CargoID: "G1", Target: "C1"},
+		{Kind: OpLoad, CargoID: "G2", Target: "C2"},
+	})
+	res, err := r.Preview([]Op{
+		{Kind: OpMove, CargoID: "G2", Target: "C1"},
+		{Kind: OpMove, CargoID: "G1", Target: "C2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Submittable {
+		t.Fatalf("交换应可提交: %+v", res.Rejections)
+	}
+	c1, c2 := res.Compartments[0], res.Compartments[1]
+	// 交换后 C1 的 After 中 G2 属于 C1，C2 的 After 中 G1 属于 C2。
+	if len(c1.After.Cargo) != 1 || c1.After.Cargo[0].ID != "G2" ||
+		!c1.After.Cargo[0].Loaded || c1.After.Cargo[0].CompartmentID != "C1" {
+		t.Fatalf("C1 预计清单中 G2 应属于 C1: %+v", c1.After.Cargo)
+	}
+	if len(c2.After.Cargo) != 1 || c2.After.Cargo[0].ID != "G1" ||
+		!c2.After.Cargo[0].Loaded || c2.After.Cargo[0].CompartmentID != "C2" {
+		t.Fatalf("C2 预计清单中 G1 应属于 C2: %+v", c2.After.Cargo)
+	}
+	// Before 仍保留原位置。
+	if c1.Before.Cargo[0].CompartmentID != "C1" || c2.Before.Cargo[0].CompartmentID != "C2" {
+		t.Fatalf("调整前清单应保留原位置: %+v %+v", c1.Before.Cargo, c2.Before.Cargo)
+	}
+}
+
+func TestPreviewRejectedAfterListsStillShowProjectedPositions(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 50); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 30, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G2", 30, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Preview([]Op{
+		{Kind: OpLoad, CargoID: "G1", Target: "C1"},
+		{Kind: OpLoad, CargoID: "G2", Target: "C1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Submittable {
+		t.Fatal("超重应不可提交")
+	}
+	// 被拒绝安排的 After 中，货物同样显示预计位置。
+	after := res.Compartments[0].After
+	if len(after.Cargo) != 2 {
+		t.Fatalf("预计清单应含两件货物: %+v", after.Cargo)
+	}
+	for _, cv := range after.Cargo {
+		if !cv.Loaded || cv.CompartmentID != "C1" {
+			t.Fatalf("被拒绝安排的货物也应显示预计位置: %+v", cv)
+		}
+	}
+}
+
 func TestPreviewLoadSuccess(t *testing.T) {
 	r := NewRegistry()
 	if err := r.RegisterCompartment("C1", 100); err != nil {

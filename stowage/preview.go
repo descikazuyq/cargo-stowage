@@ -105,7 +105,13 @@ func compartmentAfterView(comp *compartment, set map[string]*cargo) CompartmentV
 	overflow := false
 	for _, cid := range ids {
 		c := set[cid]
-		cargoViews = append(cargoViews, *cargoView(c))
+		view := *cargoView(c)
+		// 预计清单中的货物按模拟配载完成后的所属舱位展示；编号、重量、
+		// 目的地与混装许可仍取登记资料。cargoView 返回的是值副本，改写
+		// 位置字段不影响登记处。
+		view.Loaded = true
+		view.CompartmentID = comp.id
+		cargoViews = append(cargoViews, view)
 		if !overflow {
 			if c.weight > math.MaxInt64-used {
 				overflow = true

@@ -99,8 +99,11 @@ type Rejection struct {
 }
 
 // CompartmentPreview 是受影响舱位调整前后的完整配载快照。
-// After 反映预计配载：预计超重时 RemainingWeight 为负值；预计重量溢出
-// int64 时 After 不提供已用与剩余重量数值（保持零值），货物清单照常返回。
+// Before 反映调整前配载，清单中的货物保持原所属舱位；After 反映预计
+// 配载，清单中的货物一律显示为已装载且属于该舱位，编号、重量、目的地
+// 与混装许可仍取登记资料。预计超重时 RemainingWeight 为负值；预计重量
+// 溢出 int64 时 After 不提供已用与剩余重量数值（保持零值），货物清单
+// 照常返回。
 type CompartmentPreview struct {
 	ID     string
 	Before CompartmentView
