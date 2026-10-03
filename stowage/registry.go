@@ -1,7 +1,6 @@
 package stowage
 
 import (
-	"sort"
 	"strings"
 	"sync"
 )
@@ -113,7 +112,8 @@ func (r *Registry) Compartment(id string) (*CompartmentView, error) {
 	if !ok {
 		return nil, fail(ErrNotFound, cid, "舱位 %s 不存在", cid)
 	}
-	return compartmentView(comp), nil
+	view := compartmentView(comp)
+	return &view, nil
 }
 
 // Cargo 查询货物的当前舱位或未装载状态。
@@ -131,39 +131,6 @@ func (r *Registry) Cargo(id string) (*CargoView, error) {
 		return nil, fail(ErrNotFound, cid, "货物 %s 不存在", cid)
 	}
 	return cargoView(c), nil
-}
-
-// cargoView 构造货物快照（调用方持锁）。
-func cargoView(c *cargo) *CargoView {
-	return &CargoView{
-		ID:            c.id,
-		Weight:        c.weight,
-		Destination:   c.destination,
-		AllowMixed:    c.allowMixed,
-		Loaded:        c.compartmentID != "",
-		CompartmentID: c.compartmentID,
-	}
-}
-
-// compartmentView 构造舱位快照（调用方持锁）。
-func compartmentView(comp *compartment) *CompartmentView {
-	used := sumSet(comp.cargo)
-	ids := make([]string, 0, len(comp.cargo))
-	for cid := range comp.cargo {
-		ids = append(ids, cid)
-	}
-	sort.Strings(ids)
-	views := make([]CargoView, 0, len(ids))
-	for _, cid := range ids {
-		views = append(views, *cargoView(comp.cargo[cid]))
-	}
-	return &CompartmentView{
-		ID:              comp.id,
-		MaxWeight:       comp.maxWeight,
-		UsedWeight:      used,
-		RemainingWeight: comp.maxWeight - used,
-		Cargo:           views,
-	}
 }
 
 // sumSet 合计一组货物的重量（调用方持锁）。

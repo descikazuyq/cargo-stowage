@@ -1,5 +1,79 @@
 package stowage
 
+import (
+	"math"
+	"sort"
+)
+
+// cargoView 构造货物快照，重量、目的地与混装许可取登记资料（调用方持锁）。
+func cargoView(c *cargo) *CargoView {
+	return &CargoView{
+		ID:            c.id,
+		Weight:        c.weight,
+		Destination:   c.destination,
+		AllowMixed:    c.allowMixed,
+		Loaded:        c.compartmentID != "",
+		CompartmentID: c.compartmentID,
+	}
+}
+
+// compartmentSnapshot 按给定货物集合生成舱位配载快照，是查询实际配载与
+// 预览预计配载共用的组装入口：清单按货物编号字典序排列，包含集合中的
+// 全部货物；每件货物的重量、目的地与混装许可取登记资料。
+//
+// projected 为 false 时清单保留货物的真实装载状态与所属舱位（实际配载）；
+// 为 true 时一律显示为已装载且属于该舱位（预计配载）。重量合计溢出
+// int64 时，已用与剩余重量不提供数值（保持零值），货物清单照常返回。
+// 调用方持锁。
+func compartmentSnapshot(comp *compartment, set map[string]*cargo, projected bool) CompartmentView {
+	ids := make([]string, 0, len(set))
+	for cid := range set {
+		ids = append(ids, cid)
+	}
+	sort.Strings(ids)
+	views := make([]CargoView, 0, len(ids))
+	var used int64
+	overflow := false
+	for _, cid := range ids {
+		c := set[cid]
+		view := *cargoView(c)
+		if projected {
+			// 预计清单中的货物按模拟配载完成后的所属舱位展示；cargoView
+			// 返回的是值副本，改写位置字段不影响登记处。
+			view.Loaded = true
+			view.CompartmentID = comp.id
+		}
+		views = append(views, view)
+		if !overflow {
+			if c.weight > math.MaxInt64-used {
+				overflow = true
+			} else {
+				used += c.weight
+			}
+		}
+	}
+	view := CompartmentView{
+		ID:        comp.id,
+		MaxWeight: comp.maxWeight,
+		Cargo:     views,
+	}
+	if !overflow {
+		view.UsedWeight = used
+		view.RemainingWeight = comp.maxWeight - used
+	}
+	return view
+}
+
+// compartmentView 生成舱位当前实际配载的快照（调用方持锁）。
+func compartmentView(comp *compartment) CompartmentView {
+	return compartmentSnapshot(comp, comp.cargo, false)
+}
+
+// compartmentAfterView 生成舱位在模拟配载下的预计快照（调用方持锁）。
+func compartmentAfterView(comp *compartment, set map[string]*cargo) CompartmentView {
+	return compartmentSnapshot(comp, set, true)
+}
+
 // OpKind 表示调整操作的种类。
 type OpKind int
 
