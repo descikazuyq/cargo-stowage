@@ -800,6 +800,150 @@ func TestAdjustmentIDInvalid(t *testing.T) {
 	}(), ErrInvalidID)
 }
 
+// 编号允许任意非空字节，内容判断必须按原始字节区分登记处能区分的编号：
+// 含不同无效 UTF-8 字节的货物编号不能因显示为同一替代字符而被混为一件。
+func TestAdjustmentContentDistinguishesInvalidUTF8Cargo(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G\x80", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G\x81", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	res1, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G\x80", Target: "C1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 同一调整编号用于另一件字节不同的货物：按编号冲突拒绝。
+	se := requireError(t, func() error {
+		_, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G\x81", Target: "C1"}})
+		return err
+	}(), ErrAdjustmentIDConflict)
+	if se.AdjustmentID != "A1" {
+		t.Fatalf("冲突应指出调整编号 A1，实际 AdjustmentID=%q", se.AdjustmentID)
+	}
+	// 配载保持提交前状态：第一件仍在 C1，第二件未装载，舱位只占用 10 千克。
+	cv1, _ := r.Cargo("G\x80")
+	cv2, _ := r.Cargo("G\x81")
+	if !cv1.Loaded || cv1.CompartmentID != "C1" {
+		t.Fatalf("第一件货物应仍在 C1: %+v", cv1)
+	}
+	if cv2.Loaded {
+		t.Fatalf("第二件货物不应被装载: %+v", cv2)
+	}
+	comp, _ := r.Compartment("C1")
+	if comp.UsedWeight != 10 || len(comp.Cargo) != 1 {
+		t.Fatalf("舱位应只占用 10 千克且只有一件货物: %+v", comp)
+	}
+	// 换一个未使用的调整编号，第二件仍能正常装入：两件货物始终是独立记录。
+	res2, err := r.Adjust("A2", []Op{{Kind: OpLoad, CargoID: "G\x81", Target: "C1"}})
+	if err != nil {
+		t.Fatalf("新编号应能装入第二件货物: %v", err)
+	}
+	if res2.ID != "A2" || len(res2.CargoChanges) != 1 || res2.CargoChanges[0].CargoID != "G\x81" {
+		t.Fatalf("第二次调整结果错误: %+v", res2)
+	}
+	comp, _ = r.Compartment("C1")
+	if comp.UsedWeight != 20 || len(comp.Cargo) != 2 {
+		t.Fatalf("两件货物应都在舱位中: %+v", comp)
+	}
+	// 首次保存的结果不受冲突提交影响，仍可按原编号原内容取回。
+	again, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G\x80", Target: "C1"}})
+	if err != nil {
+		t.Fatalf("原编号原内容应仍返回首次结果: %v", err)
+	}
+	if again.ID != res1.ID || len(again.CargoChanges) != 1 || again.CargoChanges[0].CargoID != "G\x80" {
+		t.Fatalf("首次保存的结果应原样返回: %+v", again)
+	}
+}
+
+// 目标舱位编号同样按原始字节区分：同一调整编号指向字节不同的舱位
+// 不能视为相同内容。
+func TestAdjustmentContentDistinguishesInvalidUTF8Target(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C\x80", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCompartment("C\x81", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G1", Target: "C\x80"}}); err != nil {
+		t.Fatal(err)
+	}
+	requireError(t, func() error {
+		_, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G1", Target: "C\x81"}})
+		return err
+	}(), ErrAdjustmentIDConflict)
+	cv, _ := r.Cargo("G1")
+	if !cv.Loaded || cv.CompartmentID != "C\x80" {
+		t.Fatalf("货物应仍在原舱位: %+v", cv)
+	}
+}
+
+// 含无效 UTF-8 字节的编号与真正包含 Unicode 替代字符 U+FFFD 的编号
+// 是不同的编号，内容判断中也不能混同。
+func TestAdjustmentContentDistinguishesReplacementChar(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G\x80", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G�", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G\x80", Target: "C1"}}); err != nil {
+		t.Fatal(err)
+	}
+	requireError(t, func() error {
+		_, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G�", Target: "C1"}})
+		return err
+	}(), ErrAdjustmentIDConflict)
+	// 反向同样区分。
+	if _, err := r.Adjust("A2", []Op{{Kind: OpLoad, CargoID: "G�", Target: "C1"}}); err != nil {
+		t.Fatal(err)
+	}
+	requireError(t, func() error {
+		_, err := r.Adjust("A2", []Op{{Kind: OpLoad, CargoID: "G\x80", Target: "C1"}})
+		return err
+	}(), ErrAdjustmentIDConflict)
+}
+
+// 字节完全相同的重复提交（含无效 UTF-8 编号）仍是幂等的：
+// 返回首次成功结果，不重新装卸。
+func TestAdjustmentIdempotentWithInvalidUTF8(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C\x80", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G\x80", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	res1, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: " G\x80 ", Target: " C\x80 "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 忽略首尾空白、操作内容字节相同：返回首次结果。
+	res2, err := r.Adjust(" A1 ", []Op{{Kind: OpLoad, CargoID: "G\x80", Target: "C\x80"}})
+	if err != nil {
+		t.Fatalf("相同内容重复提交应成功: %v", err)
+	}
+	if res2.ID != res1.ID || len(res2.CargoChanges) != 1 || res2.CargoChanges[0].To != "C\x80" {
+		t.Fatalf("应返回首次成功结果: %+v", res2)
+	}
+	comp, _ := r.Compartment("C\x80")
+	if comp.UsedWeight != 10 || len(comp.Cargo) != 1 {
+		t.Fatalf("重复提交不应改变配载: %+v", comp)
+	}
+}
+
 // ---------- 查询 ----------
 
 func TestQueryNotFound(t *testing.T) {

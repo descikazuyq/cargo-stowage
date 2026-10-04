@@ -1,9 +1,9 @@
 package stowage
 
 import (
-	"encoding/json"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -12,7 +12,8 @@ import (
 // 调整编号遵循编号规则（去掉首尾空白后非空）。成功后以相同编号和
 // 相同内容重复提交，返回首次成功的结果而不再改变配载，即使之后另有
 // 调整也一样；同一编号用于不同内容被拒绝。失败的调整不占用编号，
-// 可以修正后重试。
+// 可以修正后重试。内容比较按编号去空白后的原始字节进行：登记处能
+// 区分的编号（包括含无效 UTF-8 字节的编号）在内容判断中同样区分。
 //
 // 一次调整中的所有操作作为一个整体生效：任一操作不合法，整次调整
 // 都不生效，货物归属与各舱位重量保持原样。合法性按全部操作完成后的
@@ -328,7 +329,9 @@ func (x *Rejection) firstOffender() string {
 }
 
 // canonicalKey 生成调整内容的规范化键：操作种类、货物、目标舱位相同
-// 即视为相同内容，排列顺序不影响判断。
+// 即视为相同内容，排列顺序不影响判断。编号按去掉首尾空白后的原始字节
+// 精确比较：任何字节差异都视为不同内容，包含无效 UTF-8 字节的编号与
+// 包含 Unicode 替代字符 U+FFFD 的编号也不相同。
 func canonicalKey(ops []Op) string {
 	sorted := make([]Op, len(ops))
 	for i, op := range ops {
@@ -347,10 +350,21 @@ func canonicalKey(ops []Op) string {
 		}
 		return sorted[i].Target < sorted[j].Target
 	})
-	b, err := json.Marshal(sorted)
-	if err != nil {
-		// Op 仅含基本类型，不会失败。
-		panic(err)
+	// 长度前缀编码保留原始字节，不做任何字符集层面的规整，
+	// 任意字节内容都不会因分隔符或转义而碰撞。
+	var b strings.Builder
+	for _, op := range sorted {
+		b.WriteString(strconv.Itoa(int(op.Kind)))
+		b.WriteByte('|')
+		writeRawField(&b, op.CargoID)
+		writeRawField(&b, op.Target)
 	}
-	return string(b)
+	return b.String()
+}
+
+// writeRawField 以“长度:原始字节”的形式写入一个字段。
+func writeRawField(b *strings.Builder, s string) {
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
 }
