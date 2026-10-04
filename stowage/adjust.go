@@ -14,6 +14,8 @@ import (
 // 调整也一样；同一编号用于不同内容被拒绝。失败的调整不占用编号，
 // 可以修正后重试。内容比较按编号去空白后的原始字节进行：登记处能
 // 区分的编号（包括含无效 UTF-8 字节的编号）在内容判断中同样区分。
+// 卸下操作忽略目标值，其目标不参与内容比较；装载与移动的目标舱位
+// 参与比较。
 //
 // 一次调整中的所有操作作为一个整体生效：任一操作不合法，整次调整
 // 都不生效，货物归属与各舱位重量保持原样。合法性按全部操作完成后的
@@ -329,16 +331,21 @@ func (x *Rejection) firstOffender() string {
 }
 
 // canonicalKey 生成调整内容的规范化键：操作种类、货物、目标舱位相同
-// 即视为相同内容，排列顺序不影响判断。编号按去掉首尾空白后的原始字节
-// 精确比较：任何字节差异都视为不同内容，包含无效 UTF-8 字节的编号与
-// 包含 Unicode 替代字符 U+FFFD 的编号也不相同。
+// 即视为相同内容，排列顺序不影响判断。卸下操作忽略目标舱位（执行时
+// 同样忽略），其目标值不影响内容判断；装载与移动的目标舱位参与比较。
+// 编号按去掉首尾空白后的原始字节精确比较：任何字节差异都视为不同内容，
+// 包含无效 UTF-8 字节的编号与包含 Unicode 替代字符 U+FFFD 的编号也不相同。
 func canonicalKey(ops []Op) string {
 	sorted := make([]Op, len(ops))
 	for i, op := range ops {
+		target := strings.TrimSpace(op.Target)
+		if op.Kind == OpUnload {
+			target = ""
+		}
 		sorted[i] = Op{
 			Kind:    op.Kind,
 			CargoID: strings.TrimSpace(op.CargoID),
-			Target:  strings.TrimSpace(op.Target),
+			Target:  target,
 		}
 	}
 	sort.Slice(sorted, func(i, j int) bool {

@@ -728,6 +728,158 @@ func TestAdjustmentIDIdempotent(t *testing.T) {
 	}
 }
 
+// 卸下操作忽略目标值：重复提交时卸下目标的变化不影响重复识别，
+// 返回首次成功结果且不再次改变配载。
+func TestAdjustmentIdempotentIgnoresUnloadTarget(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCompartment("C2", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 30, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Adjust("A0", []Op{{Kind: OpLoad, CargoID: "G1", Target: "C1"}}); err != nil {
+		t.Fatal(err)
+	}
+	// 第一次卸下：目标留空。
+	res1, err := r.Adjust("A1", []Op{{Kind: OpUnload, CargoID: "G1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res1.CargoChanges[0].From != "C1" || res1.CargoChanges[0].To != "" {
+		t.Fatalf("卸下变化错误: %+v", res1.CargoChanges[0])
+	}
+	if res1.CompartmentChanges[0].CompartmentID != "C1" ||
+		res1.CompartmentChanges[0].WeightBefore != 30 ||
+		res1.CompartmentChanges[0].WeightAfter != 0 {
+		t.Fatalf("舱位重量变化错误: %+v", res1.CompartmentChanges[0])
+	}
+	// 第二次仍以 A1 卸下 G1，但填写了目标（已登记舱位、不存在的舱位、
+	// 仅空白均应同样忽略）：返回首次结果，不报冲突，不再次扣除重量。
+	for _, target := range []string{"C2", "CX", "   "} {
+		res2, err := r.Adjust("A1", []Op{{Kind: OpUnload, CargoID: "G1", Target: target}})
+		if err != nil {
+			t.Fatalf("卸下目标 %q 不应影响重复识别: %v", target, err)
+		}
+		if res2.CargoChanges[0].From != "C1" || res2.CargoChanges[0].To != "" {
+			t.Fatalf("应返回首次结果: %+v", res2.CargoChanges[0])
+		}
+		if res2.CompartmentChanges[0].WeightBefore != 30 || res2.CompartmentChanges[0].WeightAfter != 0 {
+			t.Fatalf("应返回首次重量变化: %+v", res2.CompartmentChanges[0])
+		}
+	}
+	cv, _ := r.Compartment("C1")
+	if cv.UsedWeight != 0 {
+		t.Fatalf("重复提交不应再次扣除重量: %+v", cv)
+	}
+	// G1 经另一调整装入 C2 后，再提交旧调整仍返回原结果，不再次卸下。
+	if _, err := r.Adjust("A2", []Op{{Kind: OpLoad, CargoID: "G1", Target: "C2"}}); err != nil {
+		t.Fatal(err)
+	}
+	res3, err := r.Adjust("A1", []Op{{Kind: OpUnload, CargoID: "G1", Target: "C1"}})
+	if err != nil {
+		t.Fatalf("旧调整重复提交不应报错: %v", err)
+	}
+	if res3.CargoChanges[0].From != "C1" || res3.CargoChanges[0].To != "" {
+		t.Fatalf("应按原结果返回，不得按当前配载重算: %+v", res3.CargoChanges[0])
+	}
+	cv1, _ := r.Cargo("G1")
+	if cv1.CompartmentID != "C2" {
+		t.Fatalf("重复提交旧调整不得再次卸下当前货物: %+v", cv1)
+	}
+}
+
+// 首次填了卸下目标、再次删掉或更换目标，同样识别为原调整。
+func TestAdjustmentIdempotentUnloadTargetRemoved(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 30, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Adjust("A0", []Op{{Kind: OpLoad, CargoID: "G1", Target: "C1"}}); err != nil {
+		t.Fatal(err)
+	}
+	res1, err := r.Adjust("A1", []Op{{Kind: OpUnload, CargoID: "G1", Target: "C1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"", "C2"} {
+		res2, err := r.Adjust("A1", []Op{{Kind: OpUnload, CargoID: "G1", Target: target}})
+		if err != nil {
+			t.Fatalf("卸下目标改为 %q 不应影响重复识别: %v", target, err)
+		}
+		if res2.CargoChanges[0].From != res1.CargoChanges[0].From {
+			t.Fatalf("应返回首次结果: %+v", res2.CargoChanges[0])
+		}
+	}
+}
+
+// 混合调整中仅卸下目标被忽略；装载/移动目标、货物编号、操作种类、
+// 操作数量的变化仍属不同内容。操作排列顺序与编号首尾空白不影响识别。
+func TestAdjustmentIdempotentMixedOpsUnloadTarget(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCompartment("C2", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G2", 20, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Adjust("A0", []Op{{Kind: OpLoad, CargoID: "G1", Target: "C1"}}); err != nil {
+		t.Fatal(err)
+	}
+	res1, err := r.Adjust("A1", []Op{
+		{Kind: OpUnload, CargoID: "G1"},
+		{Kind: OpLoad, CargoID: "G2", Target: "C2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 仅更换卸下目标、调整操作顺序、编号加首尾空白：识别为原调整。
+	res2, err := r.Adjust("  A1\t", []Op{
+		{Kind: OpLoad, CargoID: "G2", Target: "C2"},
+		{Kind: OpUnload, CargoID: "G1", Target: "C2"},
+	})
+	if err != nil {
+		t.Fatalf("仅卸下目标变化应识别为原调整: %v", err)
+	}
+	if res2.ID != "A1" || len(res2.CargoChanges) != len(res1.CargoChanges) {
+		t.Fatalf("应返回首次结果: %+v", res2)
+	}
+	// 改变装载目标：编号冲突。
+	se := requireError(t, func() error {
+		_, err := r.Adjust("A1", []Op{
+			{Kind: OpUnload, CargoID: "G1"},
+			{Kind: OpLoad, CargoID: "G2", Target: "C1"},
+		})
+		return err
+	}(), ErrAdjustmentIDConflict)
+	if se.AdjustmentID != "A1" {
+		t.Fatalf("编号冲突应指出调整编号，实际 AdjustmentID=%q", se.AdjustmentID)
+	}
+	// 改变操作数量：编号冲突。
+	requireError(t, func() error {
+		_, err := r.Adjust("A1", []Op{{Kind: OpUnload, CargoID: "G1"}})
+		return err
+	}(), ErrAdjustmentIDConflict)
+	// 冲突后配载与原成功结果保持不变。
+	cv1, _ := r.Cargo("G1")
+	cv2, _ := r.Cargo("G2")
+	if cv1.Loaded || cv2.CompartmentID != "C2" {
+		t.Fatalf("冲突不应改变配载: %+v %+v", cv1, cv2)
+	}
+}
+
 func TestAdjustmentIDConflict(t *testing.T) {
 	r := NewRegistry()
 	if err := r.RegisterCompartment("C1", 100); err != nil {
