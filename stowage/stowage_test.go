@@ -757,6 +757,91 @@ func TestAdjustmentIDConflict(t *testing.T) {
 	}
 }
 
+func TestAdjustmentIDConflictNonUTF8IDs(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterCompartment("C1", 100); err != nil {
+		t.Fatal(err)
+	}
+	// 两件货物编号只差一个无效 UTF-8 字节，登记处应始终区分它们。
+	g1 := "G\x80"
+	g2 := "G\x81"
+	if err := r.RegisterCargo(g1, 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo(g2, 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: g1, Target: "C1"}}); err != nil {
+		t.Fatal(err)
+	}
+	// 同一调整编号用于另一件货物：必须按冲突拒绝，不能冒充首次结果。
+	se := requireError(t, func() error {
+		_, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: g2, Target: "C1"}})
+		return err
+	}(), ErrAdjustmentIDConflict)
+	if se.AdjustmentID != "A1" {
+		t.Fatalf("编号冲突应指出调整编号，实际 AdjustmentID=%q", se.AdjustmentID)
+	}
+	// 配载保持提交前状态：第一件仍在 C1，第二件仍未装载，舱位只占 10 千克。
+	cv1, _ := r.Cargo(g1)
+	cv2, _ := r.Cargo(g2)
+	if cv1.CompartmentID != "C1" || cv2.Loaded {
+		t.Fatalf("冲突调整不应生效: %+v %+v", cv1, cv2)
+	}
+	comp, _ := r.Compartment("C1")
+	if comp.UsedWeight != 10 {
+		t.Fatalf("舱位占用应为 10 千克，实际 %d", comp.UsedWeight)
+	}
+	// 换一个未使用的调整编号，第二件货物仍能正常装入。
+	if _, err := r.Adjust("A2", []Op{{Kind: OpLoad, CargoID: g2, Target: "C1"}}); err != nil {
+		t.Fatalf("两件货物是独立记录，新编号应能装入第二件: %v", err)
+	}
+	cv2, _ = r.Cargo(g2)
+	if cv2.CompartmentID != "C1" {
+		t.Fatalf("第二件应已装入 C1: %+v", cv2)
+	}
+}
+
+func TestAdjustmentIDConflictNonUTF8Target(t *testing.T) {
+	r := NewRegistry()
+	// 目标舱位编号同样按原始字节区分：无效 UTF-8 字节不等于 U+FFFD。
+	c1 := "C\x80"
+	c2 := "C�"
+	if err := r.RegisterCompartment(c1, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCompartment(c2, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterCargo("G1", 10, "X", true); err != nil {
+		t.Fatal(err)
+	}
+	res1, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G1", Target: c1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 同一编号、不同目标（原始字节不同）必须按冲突拒绝。
+	se := requireError(t, func() error {
+		_, err := r.Adjust("A1", []Op{{Kind: OpLoad, CargoID: "G1", Target: c2}})
+		return err
+	}(), ErrAdjustmentIDConflict)
+	if se.AdjustmentID != "A1" {
+		t.Fatalf("编号冲突应指出调整编号，实际 AdjustmentID=%q", se.AdjustmentID)
+	}
+	// 真正相同的重复提交（忽略首尾空白）仍返回首次结果。
+	res2, err := r.Adjust(" A1 ", []Op{{Kind: OpLoad, CargoID: " G1 ", Target: " " + c1 + " "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.ID != res1.ID || len(res2.CargoChanges) != 1 || res2.CargoChanges[0].To != c1 {
+		t.Fatalf("相同内容重复提交应返回首次结果: %+v", res2)
+	}
+	cv, _ := r.Cargo("G1")
+	if cv.CompartmentID != c1 {
+		t.Fatalf("货物应仍在原舱位: %+v", cv)
+	}
+}
+
 func TestFailedAdjustmentDoesNotConsumeID(t *testing.T) {
 	r := NewRegistry()
 	if err := r.RegisterCompartment("C1", 50); err != nil {

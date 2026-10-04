@@ -1,7 +1,7 @@
 package stowage
 
 import (
-	"encoding/json"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -329,6 +329,11 @@ func (x *Rejection) firstOffender() string {
 
 // canonicalKey 生成调整内容的规范化键：操作种类、货物、目标舱位相同
 // 即视为相同内容，排列顺序不影响判断。
+//
+// 编号按原始字节精确比较：登记处允许编号包含任意非空字节（包括无效
+// UTF-8），不同字节序列必须得到不同的键，不能因编码转换（如 JSON 会把
+// 无效 UTF-8 改写为 U+FFFD）而把不同编号混为一谈。键采用长度前缀的
+// 原始字节编码，保证不同内容必然得到不同键。
 func canonicalKey(ops []Op) string {
 	sorted := make([]Op, len(ops))
 	for i, op := range ops {
@@ -347,10 +352,10 @@ func canonicalKey(ops []Op) string {
 		}
 		return sorted[i].Target < sorted[j].Target
 	})
-	b, err := json.Marshal(sorted)
-	if err != nil {
-		// Op 仅含基本类型，不会失败。
-		panic(err)
+	var b strings.Builder
+	for _, op := range sorted {
+		fmt.Fprintf(&b, "%d|%d:%s|%d:%s|",
+			int(op.Kind), len(op.CargoID), op.CargoID, len(op.Target), op.Target)
 	}
-	return string(b)
+	return b.String()
 }
