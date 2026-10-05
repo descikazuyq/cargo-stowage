@@ -17,3 +17,8 @@ go test ./...
   提交（`Adjust`）的关系。文中的 Go 示例与
   `stowage/example_preview_test.go` 对应，可通过上面的测试命令直接
   验证输出。
+- [更正已登记货物的资料](docs/amend-cargo.md)：货物登记后如何用
+  `AmendCargo` 整体替换一件货物的重量、目的地与混装许可，怎样查询
+  更正结果，两种被拒绝的情况（超重、混装冲突）及失败后如何确认原配载
+  保留，以及更正后新查询/新预览使用新资料、旧快照不变。文中的 Go 示例
+  与 `stowage/example_amend_test.go` 对应。
