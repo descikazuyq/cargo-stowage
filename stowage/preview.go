@@ -36,18 +36,12 @@ func (r *Registry) Preview(ops []Op) (*PreviewResult, error) {
 		return nil, err
 	}
 
-	// 涉及货物的原舱位与预计舱位，按货物编号字典序排列。
+	// 涉及货物的原舱位与预计舱位，按货物编号字典序排列；去向规则与
+	// 正式生效、模拟配载共用同一入口。
 	cargoChanges := make([]CargoChange, 0, len(vops))
 	for _, v := range vops {
-		c := v.cargo
-		change := CargoChange{CargoID: c.id, From: c.compartmentID}
-		switch v.op.Kind {
-		case OpLoad, OpMove:
-			change.To = v.target.id
-		case OpUnload:
-			change.To = ""
-		}
-		cargoChanges = append(cargoChanges, change)
+		from, to := v.relocation()
+		cargoChanges = append(cargoChanges, CargoChange{CargoID: v.cargo.id, From: from, To: to})
 	}
 	sort.Slice(cargoChanges, func(i, j int) bool {
 		return cargoChanges[i].CargoID < cargoChanges[j].CargoID

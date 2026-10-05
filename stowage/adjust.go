@@ -78,25 +78,17 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 		return compChanges[i].CompartmentID < compChanges[j].CompartmentID
 	})
 
+	// 正式生效：在与模拟配载相同的去向规则下改写各舱位的实际货物集
+	// （map 为引用，直接反映到舱位记录），再更新货物所属舱位并记录变化。
+	// 同一货物在一批中只出现一次，应用顺序不影响结果。
+	real := make(map[string]map[string]*cargo, len(r.compartments))
+	for id, comp := range r.compartments {
+		real[id] = comp.cargo
+	}
 	for _, v := range vops {
-		c := v.cargo
-		from := c.compartmentID
-		var to string
-		switch v.op.Kind {
-		case OpLoad:
-			r.compartments[v.target.id].cargo[c.id] = c
-			c.compartmentID = v.target.id
-			to = v.target.id
-		case OpUnload:
-			delete(r.compartments[from].cargo, c.id)
-			c.compartmentID = ""
-		case OpMove:
-			delete(r.compartments[from].cargo, c.id)
-			r.compartments[v.target.id].cargo[c.id] = c
-			c.compartmentID = v.target.id
-			to = v.target.id
-		}
-		cargoChanges = append(cargoChanges, CargoChange{CargoID: c.id, From: from, To: to})
+		from, to := v.apply(real)
+		v.cargo.compartmentID = to
+		cargoChanges = append(cargoChanges, CargoChange{CargoID: v.cargo.id, From: from, To: to})
 	}
 	sort.Slice(cargoChanges, func(i, j int) bool {
 		return cargoChanges[i].CargoID < cargoChanges[j].CargoID
@@ -117,6 +109,33 @@ type validOp struct {
 	op     Op
 	cargo  *cargo
 	target *compartment // 装载/移动的目标舱位；卸下时为 nil
+}
+
+// relocation 是货物位置变化去向规则的唯一裁定：from 为原舱位（空字符串
+// 表示未装载），to 为最终舱位——装载从未装载到目标舱位，卸下回到未装载
+// （空字符串），移动从原舱位到目标舱位。预演模拟、正式生效与货物变化
+// 记录都经由这里取得去向，保证同一操作在各处的判定一致。
+func (v validOp) relocation() (from, to string) {
+	from = v.cargo.compartmentID
+	switch v.op.Kind {
+	case OpLoad, OpMove:
+		to = v.target.id
+	}
+	return from, to
+}
+
+// apply 按去向规则把这条操作应用到一份配载集合上（模拟配载或各舱位的
+// 实际货物集），并返回调整前后的所属舱位。集合以舱位编号索引，未装载
+// 不属于任何集合，卸下只移出不加入。
+func (v validOp) apply(sets map[string]map[string]*cargo) (from, to string) {
+	from, to = v.relocation()
+	if from != "" {
+		delete(sets[from], v.cargo.id)
+	}
+	if to != "" {
+		sets[to][v.cargo.id] = v.cargo
+	}
+	return from, to
 }
 
 // prepareOps 逐条校验操作并在模拟配载上应用全部操作。
@@ -189,7 +208,8 @@ func (r *Registry) prepareOps(
 		}
 	}
 
-	// 在模拟配载上应用全部操作，判断以完成后的最终状态为准。
+	// 在模拟配载上应用全部操作，判断以完成后的最终状态为准；位置变化
+	// 与正式生效、货物变化记录共用同一套去向规则。
 	final = make(map[string]map[string]*cargo, len(r.compartments))
 	for id, comp := range r.compartments {
 		set := make(map[string]*cargo, len(comp.cargo))
@@ -199,15 +219,7 @@ func (r *Registry) prepareOps(
 		final[id] = set
 	}
 	for _, v := range vops {
-		switch v.op.Kind {
-		case OpLoad:
-			final[v.target.id][v.cargo.id] = v.cargo
-		case OpUnload:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-		case OpMove:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-			final[v.target.id][v.cargo.id] = v.cargo
-		}
+		v.apply(final)
 	}
 	return vops, final, affected, nil
 }
