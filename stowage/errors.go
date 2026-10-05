@@ -89,3 +89,29 @@ func (e *Error) Error() string {
 func fail(kind ErrorKind, id string, format string, args ...any) *Error {
 	return &Error{Kind: kind, ID: id, detail: fmt.Sprintf(format, args...)}
 }
+
+// rejectionError 把最终配载评估出的单个拒绝原因转换成正式操作的结构化
+// 错误，Adjust 与 AmendCargo 共用同一套对应关系，保证同一种拒绝原因的
+// 错误类别、涉及对象与中文说明一致：
+// 重量溢出与超重指向舱位，超重说明保留预计总重量与最大承重，溢出不展示
+// 无法表示的合计重量；混装冲突指向舱内编号字典序最靠前的一件不允许
+// 混装货物（可能原本就在舱内），说明同时指出舱位与该货物。
+// failf 决定错误是否携带调整编号：Adjust 传入盖编号的构造函数，
+// AmendCargo 直接传入 fail。
+func rejectionError(
+	rej *Rejection,
+	failf func(kind ErrorKind, id string, format string, args ...any) *Error,
+) *Error {
+	switch rej.Kind {
+	case ErrOverflow:
+		return failf(ErrOverflow, rej.CompartmentID, "舱位 %s 重量合计超过 int64 可表示范围", rej.CompartmentID)
+	case ErrOverweight:
+		return failf(ErrOverweight, rej.CompartmentID,
+			"舱位 %s 总重量 %d 千克超过最大承重 %d 千克",
+			rej.CompartmentID, rej.UsedWeight, rej.MaxWeight)
+	default:
+		return failf(ErrMixedLoading, rej.firstOffender(),
+			"舱位 %s 存在不同目的地货物，但货物 %s 不允许混装",
+			rej.CompartmentID, rej.firstOffender())
+	}
+}
