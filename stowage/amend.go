@@ -61,19 +61,10 @@ func (r *Registry) AmendCargo(id string, weight int64, destination string, allow
 			}
 		}
 		final := map[string]map[string]*cargo{comp.id: set}
+		// 模拟配载只包含所属舱位，因此拒绝原因必然属于该舱位。转换与
+		// Adjust 共用同一入口；更正不携带调整编号。
 		if rej := r.firstRejection(final); rej != nil {
-			switch rej.Kind {
-			case ErrOverflow:
-				return fail(ErrOverflow, comp.id, "舱位 %s 重量合计超过 int64 可表示范围", comp.id)
-			case ErrOverweight:
-				return fail(ErrOverweight, comp.id,
-					"舱位 %s 总重量 %d 千克超过最大承重 %d 千克",
-					comp.id, rej.UsedWeight, comp.maxWeight)
-			default:
-				return fail(ErrMixedLoading, rej.firstOffender(),
-					"舱位 %s 存在不同目的地货物，但货物 %s 不允许混装",
-					comp.id, rej.firstOffender())
-			}
+			return rej.toError()
 		}
 	}
 

@@ -56,19 +56,12 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 	}
 
 	// 按最终配载校验承重与混装限制，返回第一个问题即拒绝整次调整。
+	// 拒绝原因到结构化错误的转换与 AmendCargo 共用同一入口，再补上
+	// 去掉首尾空白后的本次调整编号。
 	if rej := r.firstRejection(final); rej != nil {
-		switch rej.Kind {
-		case ErrOverflow:
-			return nil, f(ErrOverflow, rej.CompartmentID, "舱位 %s 重量合计超过 int64 可表示范围", rej.CompartmentID)
-		case ErrOverweight:
-			return nil, f(ErrOverweight, rej.CompartmentID,
-				"舱位 %s 总重量 %d 千克超过最大承重 %d 千克",
-				rej.CompartmentID, rej.UsedWeight, r.compartments[rej.CompartmentID].maxWeight)
-		default:
-			return nil, f(ErrMixedLoading, rej.firstOffender(),
-				"舱位 %s 存在不同目的地货物，但货物 %s 不允许混装",
-				rej.CompartmentID, rej.firstOffender())
-		}
+		e := rej.toError()
+		e.AdjustmentID = aid
+		return nil, e
 	}
 
 	// 全部合法，正式生效。先计算受影响舱位调整前后的重量。
