@@ -1,7 +1,6 @@
 package stowage
 
 import (
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,8 +66,8 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 	for id := range affected {
 		compChanges = append(compChanges, CompartmentChange{
 			CompartmentID: id,
-			WeightBefore:  sumSet(r.compartments[id].cargo),
-			WeightAfter:   sumSet(final[id]),
+			WeightBefore:  usedWeight(r.compartments[id].cargo),
+			WeightAfter:   usedWeight(final[id]),
 		})
 	}
 	sort.Slice(compChanges, func(i, j int) bool {
@@ -217,33 +216,8 @@ func (r *Registry) evaluateFinal(final map[string]map[string]*cargo) []*Rejectio
 	for id, set := range final {
 		comp := r.compartments[id]
 
-		// 重量原因：溢出优先，溢出时不提供任何重量数值。
-		var sum int64
-		overflow := false
-		for _, c := range set {
-			if c.weight > math.MaxInt64-sum {
-				overflow = true
-				break
-			}
-			sum += c.weight
-		}
-		var rej *Rejection
-		if overflow {
-			rej = &Rejection{
-				CompartmentID: id,
-				Kind:          ErrOverflow,
-				MaxWeight:     comp.maxWeight,
-			}
-		} else if sum > comp.maxWeight {
-			rej = &Rejection{
-				CompartmentID:   id,
-				Kind:            ErrOverweight,
-				MaxWeight:       comp.maxWeight,
-				UsedWeight:      sum,
-				RemainingWeight: comp.maxWeight - sum,
-				Overweight:      sum - comp.maxWeight,
-			}
-		}
+		// 重量原因（超重或溢出）统一由重量规则给出；溢出时不提供重量数值。
+		rej := weightRejection(id, comp.maxWeight, set)
 
 		// 混装原因：不同目的地共舱时，列出全部不允许混装的货物。
 		destinations := make(map[string][]string)

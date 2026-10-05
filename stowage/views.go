@@ -1,9 +1,6 @@
 package stowage
 
-import (
-	"math"
-	"sort"
-)
+import "sort"
 
 // cargoView 构造货物快照，重量、目的地与混装许可取登记资料（调用方持锁）。
 func cargoView(c *cargo) *CargoView {
@@ -24,7 +21,7 @@ func cargoView(c *cargo) *CargoView {
 // projected 为 false 时清单保留货物的真实装载状态与所属舱位（实际配载）；
 // 为 true 时一律显示为已装载且属于该舱位（预计配载）。重量合计溢出
 // int64 时，已用与剩余重量不提供数值（保持零值），货物清单照常返回。
-// 调用方持锁。
+// 合计与溢出判定统一走 tallyCargoWeights。调用方持锁。
 func compartmentSnapshot(comp *compartment, set map[string]*cargo, projected bool) CompartmentView {
 	ids := make([]string, 0, len(set))
 	for cid := range set {
@@ -32,8 +29,6 @@ func compartmentSnapshot(comp *compartment, set map[string]*cargo, projected boo
 	}
 	sort.Strings(ids)
 	views := make([]CargoView, 0, len(ids))
-	var used int64
-	overflow := false
 	for _, cid := range ids {
 		c := set[cid]
 		view := *cargoView(c)
@@ -44,22 +39,16 @@ func compartmentSnapshot(comp *compartment, set map[string]*cargo, projected boo
 			view.CompartmentID = comp.id
 		}
 		views = append(views, view)
-		if !overflow {
-			if c.weight > math.MaxInt64-used {
-				overflow = true
-			} else {
-				used += c.weight
-			}
-		}
 	}
 	view := CompartmentView{
 		ID:        comp.id,
 		MaxWeight: comp.maxWeight,
 		Cargo:     views,
 	}
-	if !overflow {
-		view.UsedWeight = used
-		view.RemainingWeight = comp.maxWeight - used
+	// 已用与剩余重量统一由重量规则给出：溢出时保持零值约定，承重照常提供。
+	if tally := tallyCargoWeights(set); !tally.overflow {
+		view.UsedWeight = tally.sum
+		view.RemainingWeight = comp.maxWeight - tally.sum
 	}
 	return view
 }
