@@ -80,23 +80,11 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 
 	for _, v := range vops {
 		c := v.cargo
-		from := c.compartmentID
-		var to string
-		switch v.op.Kind {
-		case OpLoad:
-			r.compartments[v.target.id].cargo[c.id] = c
-			c.compartmentID = v.target.id
-			to = v.target.id
-		case OpUnload:
-			delete(r.compartments[from].cargo, c.id)
-			c.compartmentID = ""
-		case OpMove:
-			delete(r.compartments[from].cargo, c.id)
-			r.compartments[v.target.id].cargo[c.id] = c
-			c.compartmentID = v.target.id
-			to = v.target.id
-		}
-		cargoChanges = append(cargoChanges, CargoChange{CargoID: c.id, From: from, To: to})
+		// 正式生效的落点与预演模拟共用 relocate，去向沿用逐条校验时由
+		// routeFor 确定的同一份 from/to，因此生效结果与预览逐件对应。
+		relocate(c, v.rt, r.cargoSet(v.rt.from), r.cargoSet(v.rt.to))
+		c.compartmentID = v.rt.to
+		cargoChanges = append(cargoChanges, CargoChange{CargoID: c.id, From: v.rt.from, To: v.rt.to})
 	}
 	sort.Slice(cargoChanges, func(i, j int) bool {
 		return cargoChanges[i].CargoID < cargoChanges[j].CargoID
@@ -112,11 +100,12 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 	return cloneResult(result), nil
 }
 
-// validOp 是一条通过逐条校验的操作，附带其涉及的内部记录。
+// validOp 是一条通过逐条校验的操作，附带其涉及的货物与由 routeFor
+// 确定的去向。落点与变化记录只需货物和去向，原始操作与目标舱位在逐条
+// 校验完成后不再需要。
 type validOp struct {
-	op     Op
-	cargo  *cargo
-	target *compartment // 装载/移动的目标舱位；卸下时为 nil
+	cargo *cargo
+	rt    cargoRoute // 由 routeFor 确定的原舱位与最终舱位
 }
 
 // prepareOps 逐条校验操作并在模拟配载上应用全部操作。
@@ -145,6 +134,9 @@ func (r *Registry) prepareOps(
 		}
 		seen[cid] = true
 
+		// 逐条校验，确定操作种类与目标舱位；通过后由 routeFor 统一
+		// 固定去向，模拟落点、预览变化记录与正式生效共用这同一份去向。
+		var target *compartment
 		switch op.Kind {
 		case OpLoad:
 			if c.compartmentID != "" {
@@ -158,14 +150,12 @@ func (r *Registry) prepareOps(
 			if !ok {
 				return nil, nil, nil, failf(ErrNotFound, tid, "舱位 %s 不存在", tid)
 			}
-			vops = append(vops, validOp{op, c, t})
-			affected[t.id] = true
+			target = t
 		case OpUnload:
 			if c.compartmentID == "" {
 				return nil, nil, nil, failf(ErrStateMismatch, cid, "货物 %s 未装载，不能卸下", cid)
 			}
-			vops = append(vops, validOp{op, c, nil})
-			affected[c.compartmentID] = true
+			// 卸下忽略目标值，target 保持 nil。
 		case OpMove:
 			if c.compartmentID == "" {
 				return nil, nil, nil, failf(ErrStateMismatch, cid, "货物 %s 未装载，不能移动", cid)
@@ -181,15 +171,18 @@ func (r *Registry) prepareOps(
 			if t.id == c.compartmentID {
 				return nil, nil, nil, failf(ErrDuplicateOp, cid, "货物 %s 已在舱位 %s，不能移动到原舱位", cid, t.id)
 			}
-			vops = append(vops, validOp{op, c, t})
-			affected[c.compartmentID] = true
-			affected[t.id] = true
+			target = t
 		default:
 			return nil, nil, nil, failf(ErrInvalidOp, cid, "货物 %s 的操作种类 %d 无法识别", cid, int(op.Kind))
 		}
+
+		rt := routeFor(op.Kind, c.compartmentID, target)
+		vops = append(vops, validOp{cargo: c, rt: rt})
+		touchedCompartments(affected, rt)
 	}
 
-	// 在模拟配载上应用全部操作，判断以完成后的最终状态为准。
+	// 在模拟配载上应用全部操作，落点与正式生效共用 relocate，判断以
+	// 完成后的最终状态为准。
 	final = make(map[string]map[string]*cargo, len(r.compartments))
 	for id, comp := range r.compartments {
 		set := make(map[string]*cargo, len(comp.cargo))
@@ -199,15 +192,7 @@ func (r *Registry) prepareOps(
 		final[id] = set
 	}
 	for _, v := range vops {
-		switch v.op.Kind {
-		case OpLoad:
-			final[v.target.id][v.cargo.id] = v.cargo
-		case OpUnload:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-		case OpMove:
-			delete(final[v.cargo.compartmentID], v.cargo.id)
-			final[v.target.id][v.cargo.id] = v.cargo
-		}
+		relocate(v.cargo, v.rt, final[v.rt.from], final[v.rt.to])
 	}
 	return vops, final, affected, nil
 }
