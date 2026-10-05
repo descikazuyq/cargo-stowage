@@ -1,7 +1,6 @@
 package stowage
 
 import (
-	"math"
 	"sort"
 )
 
@@ -32,8 +31,6 @@ func compartmentSnapshot(comp *compartment, set map[string]*cargo, projected boo
 	}
 	sort.Strings(ids)
 	views := make([]CargoView, 0, len(ids))
-	var used int64
-	overflow := false
 	for _, cid := range ids {
 		c := set[cid]
 		view := *cargoView(c)
@@ -44,20 +41,14 @@ func compartmentSnapshot(comp *compartment, set map[string]*cargo, projected boo
 			view.CompartmentID = comp.id
 		}
 		views = append(views, view)
-		if !overflow {
-			if c.weight > math.MaxInt64-used {
-				overflow = true
-			} else {
-				used += c.weight
-			}
-		}
 	}
 	view := CompartmentView{
 		ID:        comp.id,
 		MaxWeight: comp.maxWeight,
 		Cargo:     views,
 	}
-	if !overflow {
+	// 重量合计规则与配载校验共用同一入口；溢出时已用与剩余重量保持零值。
+	if used, ok := weightTotal(set); ok {
 		view.UsedWeight = used
 		view.RemainingWeight = comp.maxWeight - used
 	}

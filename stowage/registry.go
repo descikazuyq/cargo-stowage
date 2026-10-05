@@ -133,15 +133,6 @@ func (r *Registry) Cargo(id string) (*CargoView, error) {
 	return cargoView(c), nil
 }
 
-// sumSet 合计一组货物的重量（调用方持锁）。
-func sumSet(set map[string]*cargo) int64 {
-	var sum int64
-	for _, c := range set {
-		sum += c.weight
-	}
-	return sum
-}
-
 // cloneResult 复制一份调整结果，避免调用方修改影响已保存的快照。
 func cloneResult(r *AdjustmentResult) *AdjustmentResult {
 	return &AdjustmentResult{
