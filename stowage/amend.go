@@ -1,7 +1,5 @@
 package stowage
 
-import "strings"
-
 // AmendCargo 按货物编号更正一件货物的重量、目的地与混装许可。
 //
 // 编号与目的地沿用登记规则：去掉首尾空白后不得为空，编号区分大小写；
@@ -25,7 +23,7 @@ func (r *Registry) AmendCargo(id string, weight int64, destination string, allow
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := trimID(id)
 	if cid == "" {
 		return fail(ErrInvalidID, "", "货物编号为空")
 	}
@@ -36,7 +34,7 @@ func (r *Registry) AmendCargo(id string, weight int64, destination string, allow
 	if weight <= 0 {
 		return fail(ErrInvalidWeight, cid, "货物 %s 重量必须为正整数千克，当前为 %d", cid, weight)
 	}
-	dest := strings.TrimSpace(destination)
+	dest := trimID(destination)
 	if dest == "" {
 		return fail(ErrInvalidDestination, cid, "货物 %s 目的地为空", cid)
 	}

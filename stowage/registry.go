@@ -1,9 +1,6 @@
 package stowage
 
-import (
-	"strings"
-	"sync"
-)
+import "sync"
 
 // compartment 是舱位的内部记录。
 type compartment struct {
@@ -49,7 +46,7 @@ func (r *Registry) RegisterCompartment(id string, maxWeight int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := trimID(id)
 	if cid == "" {
 		return fail(ErrInvalidID, "", "舱位编号为空")
 	}
@@ -75,14 +72,14 @@ func (r *Registry) RegisterCargo(id string, weight int64, destination string, al
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := trimID(id)
 	if cid == "" {
 		return fail(ErrInvalidID, "", "货物编号为空")
 	}
 	if weight <= 0 {
 		return fail(ErrInvalidWeight, cid, "货物 %s 重量必须为正整数千克，当前为 %d", cid, weight)
 	}
-	dest := strings.TrimSpace(destination)
+	dest := trimID(destination)
 	if dest == "" {
 		return fail(ErrInvalidDestination, cid, "货物 %s 目的地为空", cid)
 	}
@@ -104,7 +101,7 @@ func (r *Registry) Compartment(id string) (*CompartmentView, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := trimID(id)
 	if cid == "" {
 		return nil, fail(ErrInvalidID, "", "舱位编号为空")
 	}
@@ -122,7 +119,7 @@ func (r *Registry) Cargo(id string) (*CargoView, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := trimID(id)
 	if cid == "" {
 		return nil, fail(ErrInvalidID, "", "货物编号为空")
 	}

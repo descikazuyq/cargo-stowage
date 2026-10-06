@@ -25,7 +25,7 @@ func (r *Registry) Adjust(adjustmentID string, ops []Op) (*AdjustmentResult, err
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	aid := strings.TrimSpace(adjustmentID)
+	aid := trimID(adjustmentID)
 	if aid == "" {
 		return nil, fail(ErrInvalidID, "", "调整编号为空")
 	}
@@ -121,7 +121,10 @@ func (r *Registry) prepareOps(
 	affected = make(map[string]bool)
 
 	for _, op := range ops {
-		cid := strings.TrimSpace(op.CargoID)
+		// 编号识别与内容比较共用 normalizeOp：货物编号与装载/移动目标
+		// 只去首尾空白，卸下目标视为空，字节级差异一律保留。
+		nop := normalizeOp(op)
+		cid := nop.CargoID
 		if cid == "" {
 			return nil, nil, nil, failf(ErrInvalidID, "", "货物编号为空")
 		}
@@ -136,19 +139,17 @@ func (r *Registry) prepareOps(
 
 		// 逐条校验，确定操作种类与目标舱位；通过后由 routeFor 统一
 		// 固定去向，模拟落点、预览变化记录与正式生效共用这同一份去向。
+		// 先核对货物状态，再解析目标舱位：状态不符时即使目标空白或不
+		// 存在，也先报告状态问题。
 		var target *compartment
-		switch op.Kind {
+		switch nop.Kind {
 		case OpLoad:
 			if c.compartmentID != "" {
 				return nil, nil, nil, failf(ErrStateMismatch, cid, "货物 %s 已装载于舱位 %s，不能再次装载", cid, c.compartmentID)
 			}
-			tid := strings.TrimSpace(op.Target)
-			if tid == "" {
-				return nil, nil, nil, failf(ErrInvalidID, "", "目标舱位编号为空")
-			}
-			t, ok := r.compartments[tid]
-			if !ok {
-				return nil, nil, nil, failf(ErrNotFound, tid, "舱位 %s 不存在", tid)
+			t, err := r.targetCompartment(nop.Target, failf)
+			if err != nil {
+				return nil, nil, nil, err
 			}
 			target = t
 		case OpUnload:
@@ -160,23 +161,19 @@ func (r *Registry) prepareOps(
 			if c.compartmentID == "" {
 				return nil, nil, nil, failf(ErrStateMismatch, cid, "货物 %s 未装载，不能移动", cid)
 			}
-			tid := strings.TrimSpace(op.Target)
-			if tid == "" {
-				return nil, nil, nil, failf(ErrInvalidID, "", "目标舱位编号为空")
-			}
-			t, ok := r.compartments[tid]
-			if !ok {
-				return nil, nil, nil, failf(ErrNotFound, tid, "舱位 %s 不存在", tid)
+			t, err := r.targetCompartment(nop.Target, failf)
+			if err != nil {
+				return nil, nil, nil, err
 			}
 			if t.id == c.compartmentID {
 				return nil, nil, nil, failf(ErrDuplicateOp, cid, "货物 %s 已在舱位 %s，不能移动到原舱位", cid, t.id)
 			}
 			target = t
 		default:
-			return nil, nil, nil, failf(ErrInvalidOp, cid, "货物 %s 的操作种类 %d 无法识别", cid, int(op.Kind))
+			return nil, nil, nil, failf(ErrInvalidOp, cid, "货物 %s 的操作种类 %d 无法识别", cid, int(nop.Kind))
 		}
 
-		rt := routeFor(op.Kind, c.compartmentID, target)
+		rt := routeFor(nop.Kind, c.compartmentID, target)
 		vops = append(vops, validOp{cargo: c, rt: rt})
 		touchedCompartments(affected, rt)
 	}
@@ -195,6 +192,20 @@ func (r *Registry) prepareOps(
 		relocate(v.cargo, v.rt, final[v.rt.from], final[v.rt.to])
 	}
 	return vops, final, affected, nil
+}
+
+// targetCompartment 查找装载或移动的目标舱位，是两种操作唯一的目标解析
+// 入口。tid 必须已按编号识别规则去空白（见 normalizeOp）；空编号与未登记
+// 编号分别按现有的结构化错误拒绝。调用方必须持有 r.mu。
+func (r *Registry) targetCompartment(tid string, failf func(kind ErrorKind, id string, format string, args ...any) *Error) (*compartment, error) {
+	if tid == "" {
+		return nil, failf(ErrInvalidID, "", "目标舱位编号为空")
+	}
+	t, ok := r.compartments[tid]
+	if !ok {
+		return nil, failf(ErrNotFound, tid, "舱位 %s 不存在", tid)
+	}
+	return t, nil
 }
 
 // evaluateFinal 按最终配载评估每个舱位的承重与混装限制，一个舱位可以
@@ -302,22 +313,15 @@ func (x *Rejection) firstOffender() string {
 }
 
 // canonicalKey 生成调整内容的规范化键：操作种类、货物、目标舱位相同
-// 即视为相同内容，排列顺序不影响判断。卸下操作忽略目标舱位（执行时
-// 同样忽略），其目标值不影响内容判断；装载与移动的目标舱位参与比较。
-// 编号按去掉首尾空白后的原始字节精确比较：任何字节差异都视为不同内容，
-// 包含无效 UTF-8 字节的编号与包含 Unicode 替代字符 U+FFFD 的编号也不相同。
+// 即视为相同内容，排列顺序不影响判断。编号识别与逐条校验共用
+// normalizeOp：只去首尾空白、按原始字节精确比较，任何字节差异都视为
+// 不同内容，包含无效 UTF-8 字节的编号与包含 Unicode 替代字符 U+FFFD
+// 的编号也不相同；卸下操作忽略目标舱位（执行时同样忽略），其目标值
+// 不影响内容判断，装载与移动的目标舱位参与比较。
 func canonicalKey(ops []Op) string {
 	sorted := make([]Op, len(ops))
 	for i, op := range ops {
-		target := strings.TrimSpace(op.Target)
-		if op.Kind == OpUnload {
-			target = ""
-		}
-		sorted[i] = Op{
-			Kind:    op.Kind,
-			CargoID: strings.TrimSpace(op.CargoID),
-			Target:  target,
-		}
+		sorted[i] = normalizeOp(op)
 	}
 	sort.Slice(sorted, func(i, j int) bool {
 		if sorted[i].Kind != sorted[j].Kind {
