@@ -25,7 +25,7 @@ func (r *Registry) AmendCargo(id string, weight int64, destination string, allow
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := normalizeID(id)
 	if cid == "" {
 		return fail(ErrInvalidID, "", "货物编号为空")
 	}

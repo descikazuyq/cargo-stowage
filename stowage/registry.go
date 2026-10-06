@@ -49,7 +49,7 @@ func (r *Registry) RegisterCompartment(id string, maxWeight int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := normalizeID(id)
 	if cid == "" {
 		return fail(ErrInvalidID, "", "舱位编号为空")
 	}
@@ -75,7 +75,7 @@ func (r *Registry) RegisterCargo(id string, weight int64, destination string, al
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := normalizeID(id)
 	if cid == "" {
 		return fail(ErrInvalidID, "", "货物编号为空")
 	}
@@ -104,7 +104,7 @@ func (r *Registry) Compartment(id string) (*CompartmentView, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := normalizeID(id)
 	if cid == "" {
 		return nil, fail(ErrInvalidID, "", "舱位编号为空")
 	}
@@ -122,7 +122,7 @@ func (r *Registry) Cargo(id string) (*CargoView, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cid := strings.TrimSpace(id)
+	cid := normalizeID(id)
 	if cid == "" {
 		return nil, fail(ErrInvalidID, "", "货物编号为空")
 	}

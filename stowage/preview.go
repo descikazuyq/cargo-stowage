@@ -30,8 +30,11 @@ func (r *Registry) Preview(ops []Op) (*PreviewResult, error) {
 		return nil, fail(ErrEmptyAdjustment, "", "预览清单不包含任何操作")
 	}
 
-	// 与正式提交共用同一套逐条校验与最终配载模拟；预览不带调整编号。
-	vops, final, affected, err := r.prepareOps(ops, fail)
+	// 编号规整与正式提交共用同一入口；预览不带调整编号。
+	nops := normalizeOps(ops)
+
+	// 与正式提交共用同一套逐条校验与最终配载模拟。
+	vops, final, affected, err := r.prepareOps(nops, fail)
 	if err != nil {
 		return nil, err
 	}

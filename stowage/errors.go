@@ -98,10 +98,7 @@ func fail(kind ErrorKind, id string, format string, args ...any) *Error {
 // 混装货物（可能原本就在舱内），说明同时指出舱位与该货物。
 // failf 决定错误是否携带调整编号：Adjust 传入盖编号的构造函数，
 // AmendCargo 直接传入 fail。
-func rejectionError(
-	rej *Rejection,
-	failf func(kind ErrorKind, id string, format string, args ...any) *Error,
-) *Error {
+func rejectionError(rej *Rejection, failf errorf) *Error {
 	switch rej.Kind {
 	case ErrOverflow:
 		return failf(ErrOverflow, rej.CompartmentID, "舱位 %s 重量合计超过 int64 可表示范围", rej.CompartmentID)
